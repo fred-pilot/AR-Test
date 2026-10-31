@@ -1,0 +1,19 @@
+name: Probe Xcode 27
+
+on:
+  push:
+    branches: [feature/auto-tracking]
+    paths: [.github/workflows/probe.yml]
+
+jobs:
+  probe:
+    runs-on: xcode-27
+    timeout-minutes: 15
+    steps:
+      - run: sw_vers; xcodebuild -version; xcodebuild -showsdks | grep -i ios; sysctl -n machdep.cpu.brand_string hw.ncpu hw.memsize
+      - run: system_profiler SPDisplaysDataType | head -20
+      - run: xcrun createml objecttracker -h || true
+      - run: |
+          H=$(xcrun --sdk iphoneos --show-sdk-path)/System/Library/Frameworks/ARKit.framework
+          grep -rn -i "trackingObjects" "$H" | head -20 || true
+          grep -rn -i "isTracked" "$H" | head -10 || true
