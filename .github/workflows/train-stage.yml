@@ -30,6 +30,23 @@ jobs:
           name: state-${{ matrix.mode }}-${{ inputs.previous }}
           path: state
 
+      # Create ML braucht im Modus extended mindestens 43 GB freien Platz, mehr als der Runner von Haus aus hat.
+      - name: Speicherplatz freiräumen
+        run: |
+          df -h /
+          xcrun simctl shutdown all 2>/dev/null || true
+          xcrun simctl delete all 2>/dev/null || true
+          xcrun simctl runtime delete all 2>/dev/null || true
+          active=$(dirname "$(dirname "$(xcode-select -p)")")
+          for app in /Applications/Xcode*.app; do
+            real=$(cd "$app" && pwd -P)
+            [ "$real" = "$(cd "$active" && pwd -P)" ] || sudo rm -rf "$app"
+          done
+          sudo rm -rf ~/Library/Android ~/.android ~/.dotnet /usr/local/share/dotnet \
+            ~/hostedtoolcache /Users/runner/hostedtoolcache ~/Library/Developer/CoreSimulator/Caches \
+            ~/Library/Caches/com.apple.dt.* /Library/Developer/CoreSimulator/Images 2>/dev/null || true
+          df -h /
+
       - name: Trainieren (höchstens 5,5 Stunden)
         id: train
         run: |
@@ -38,7 +55,7 @@ jobs:
             echo "Schon in einer früheren Etappe fertig geworden."
             exit 0
           fi
-          xcodebuild -version | head -n 1
+          xcodebuild -version
 
           xcrun createml objecttracker \
             --training-mode "${{ matrix.mode }}" --upright \
@@ -57,6 +74,10 @@ jobs:
           set -e
           kill "$watchdog" 2>/dev/null || true
           echo "createml beendet mit Code $code"
+          # 130 = von uns wegen des Zeitlimits angehalten, dann geht es in der nächsten Etappe weiter.
+          if [ "$code" -ne 0 ] && [ "$code" -ne 130 ] && [ ! -f state/ToyCar.referenceobject ]; then
+            exit "$code"
+          fi
           if [ -f state/ToyCar.referenceobject ]; then
             echo "finished=true" >> "$GITHUB_OUTPUT"
             ls -l state/ToyCar.referenceobject
