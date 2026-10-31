@@ -1,0 +1,16 @@
+name: probe
+on:
+  push:
+    branches: [feature/auto-tracking]
+    paths: [.github/workflows/probe.yml]
+jobs:
+  probe:
+    runs-on: xcode-27
+    steps:
+      - run: |
+          S=$(xcrun --sdk iphoneos --show-sdk-path)/System/Library/Frameworks
+          V=$S/Vision.framework/Headers
+          ls $V | grep -i flow
+          for f in $V/VNGenerateOpticalFlowRequest.h $V/VNTrackOpticalFlowRequest.h; do echo "=== $f"; grep -v '^\s*$' "$f"; done
+          echo "=== ARCamera"; grep -n -B6 -A6 'unprojectPoint\|projectPoint' $S/ARKit.framework/Headers/ARCamera.h
+          echo "=== ARFrame timestamps"; grep -n -B3 -A3 'timestamp' $S/ARKit.framework/Headers/ARFrame.h | head -20
