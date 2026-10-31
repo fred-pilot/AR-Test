@@ -1,0 +1,32 @@
+# Xcode-Projektbeschreibung für XcodeGen (https://github.com/yonaskolb/XcodeGen).
+# Das .xcodeproj wird daraus erzeugt (`xcodegen generate`) und nicht eingecheckt.
+name: OffroadAR
+options:
+  bundleIdPrefix: de.fredericdeppe
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "5.0"
+targets:
+  OffroadAR:
+    type: application
+    platform: iOS
+    sources:
+      - path: OffroadAR
+      - path: Resources/ReferenceObjects
+        type: folder
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: de.fredericdeppe.offroadar
+        PRODUCT_NAME: OffroadAR
+        INFOPLIST_FILE: OffroadAR/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        TARGETED_DEVICE_FAMILY: "1"
+        CODE_SIGN_STYLE: Automatic
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ENABLE_PREVIEWS: NO
+    scheme: {}

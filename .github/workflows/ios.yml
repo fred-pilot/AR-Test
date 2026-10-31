@@ -1,0 +1,32 @@
+name: iOS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: XcodeGen installieren
+        run: brew install xcodegen
+
+      # Unsigniert bauen – signiert wird erst beim Installieren (Sideloadly/AltStore mit deiner Apple-ID).
+      - name: IPA bauen
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: bash scripts/build_ipa.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OffroadAR-${{ github.run_number }}
+          path: build/OffroadAR.ipa
+          retention-days: 14

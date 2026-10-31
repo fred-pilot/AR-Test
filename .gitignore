@@ -1,0 +1,20 @@
+# Wird von XcodeGen erzeugt
+*.xcodeproj/
+
+# Lokal heruntergeladenes XcodeGen (siehe scripts/build_ipa.sh)
+tools/xcodegen/
+
+# Xcode
+DerivedData/
+build/
+xcuserdata/
+*.xcarchive
+*.ipa
+
+# Geheimnisse – niemals einchecken
+*.p8
+*.p12
+*.mobileprovision
+
+.DS_Store
+Thumbs.db
