@@ -15,16 +15,16 @@ on:
 jobs:
   stage1:
     uses: ./.github/workflows/train-stage.yml
-    with: { stage: 1 }
+    with: { stage: 1, previous: 0 }
   stage2:
     needs: stage1
     uses: ./.github/workflows/train-stage.yml
-    with: { stage: 2 }
+    with: { stage: 2, previous: 1 }
   stage3:
     needs: stage2
     uses: ./.github/workflows/train-stage.yml
-    with: { stage: 3 }
+    with: { stage: 3, previous: 2 }
   stage4:
     needs: stage3
     uses: ./.github/workflows/train-stage.yml
-    with: { stage: 4 }
+    with: { stage: 4, previous: 3 }

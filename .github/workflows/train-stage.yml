@@ -6,6 +6,10 @@ on:
       stage:
         type: number
         required: true
+      # GitHub-Ausdrücke können nicht rechnen, darum wird die vorige Etappe mitgegeben (0 = keine).
+      previous:
+        type: number
+        required: true
 
 jobs:
   train:
@@ -20,10 +24,10 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Stand der vorigen Etappe holen
-        if: inputs.stage > 1
+        if: inputs.previous > 0
         uses: actions/download-artifact@v4
         with:
-          name: state-${{ matrix.mode }}-${{ inputs.stage - 1 }}
+          name: state-${{ matrix.mode }}-${{ inputs.previous }}
           path: state
 
       - name: Trainieren (höchstens 5,5 Stunden)
