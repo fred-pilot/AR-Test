@@ -6,7 +6,7 @@ passgenau darüberlegt: Die Reifen drehen sich, die Scheibenwischer wischen, War
 - **Einmal einlernen, dann automatisch:** Beim ersten Start legst du das Modell einmal aufs Auto und
   gehst einmal darum herum (etwa eine Minute). Ab dann erkennt die App das Auto bei jedem Start von selbst,
   samt Lage, Drehung, Höhe und Boden, und legt das Modell darüber.
-- Schiebst du das Auto, sucht die App es laufend neu und zieht das Modell nach (mit etwa einer Sekunde Verzögerung).
+- Schiebst oder drehst du das Auto, folgt das Modell in Echtzeit.
 - Braucht **iOS 27** oder neuer.
 - Mit LiDAR (z. B. iPhone 16 Pro) zusätzlich: optionale Verdeckung durch die Umgebung.
 - Hände vor dem Auto verdecken das Modell.
@@ -16,6 +16,7 @@ passgenau darüberlegt: Die Reifen drehen sich, die Scheibenwischer wischen, War
 | Datei | Inhalt |
 |---|---|
 | `OffroadAR/ARController.swift` | AR-Session: Einlernen, Erkennen und Nachführen des Autos |
+| `OffroadAR/MotionTracker.swift` | Echtzeit-Nachführen zwischen zwei Erkennungen (optischer Fluss) |
 | `OffroadAR/ContentView.swift` | Oberfläche: Anleitung beim Einlernen, Schalter für die Animationen |
 | `OffroadAR/ToyCar.usdz` | Die gescannte Karosserie (aus deinem Foto-Scan, ausgerichtet und bereinigt) |
 | `OffroadAR/CarModelFactory.swift` | Lädt die Karosserie und setzt Räder, Wischer und Lichter an die vermessenen Stellen |
@@ -50,8 +51,11 @@ Beim Einlernen entsteht ein ARKit-Referenzobjekt (`ToyCar.arobject`) in den App-
 genau die Stelle, an die du das Modell gelegt hast. Darum sitzt das animierte Modell später ohne
 Korrektur auf dem erkannten Auto. Liegt es nicht genau, hilft **Neu einlernen**.
 
-ARKit erkennt so ein eingelerntes Objekt nur, es verfolgt es nicht Bild für Bild. Die App vergisst das
-erkannte Auto deshalb nach einem Moment wieder, ARKit findet es neu, und das Modell rückt an die neue Stelle.
+ARKit erkennt so ein eingelerntes Objekt nur, es verfolgt es nicht Bild für Bild. Darum misst die App die
+Bewegung selbst: Punkte des Modells werden ins Kamerabild projiziert, Apples optischer Fluss (Vision) zeigt,
+wohin sie im nächsten Bild gewandert sind, und daraus ergibt sich Verschiebung und Drehung des Autos auf dem
+Boden. Zusätzlich sucht ARKit das Auto laufend neu und korrigiert die Lage, sobald es stillsteht.
+Der Schalter **Echtzeit-Nachführen** schaltet das ab (dann folgt das Modell nur den ARKit-Erkennungen).
 
 **Noch genauer, mit Verfolgung in jedem Bild:** Aus `training/ToyCar_training.usdz` lässt sich mit Create ML
 ein `.referenceobject` trainieren. Das braucht einen Mac mit Apple-Chip (M1 oder neuer) und macOS 27,
@@ -100,7 +104,8 @@ nicht mehr auf dem MacBook Pro 2017. Darum baut GitHub die App in der Cloud.
 Beim ersten Start (einmalig):
 1. Auto auf Boden oder Tisch stellen, gutes Licht, möglichst nichts anderes direkt daneben.
 2. Das Auto auf dem Bildschirm antippen. Ein halbdurchsichtiges Modell erscheint.
-3. Mit einem Finger schieben, mit zwei Fingern drehen, bis das Modell genau auf dem Auto sitzt. **Passt** tippen.
+3. Mit einem Finger schieben, mit zwei Fingern drehen. Feinjustieren mit den Knöpfen (Drehen in 1°-Schritten,
+   **Wenden** um 180°, Pfeile in 2-mm-Schritten, gedrückt halten wiederholt). Sitzt das Modell genau auf dem Auto: **Passt**.
 4. Langsam einmal ganz um das Auto herumgehen, 30 bis 50 cm entfernt und leicht von oben.
    Bei 100 % speichert die App von selbst (ab 75 % geht auch **Fertig**).
 

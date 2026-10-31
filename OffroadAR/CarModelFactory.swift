@@ -17,6 +17,7 @@ enum CarModelFactory {
         car.name = "ToyCar"
         if Bundle.main.url(forResource: "ToyCar", withExtension: "usdz") != nil,
            let body = try? Entity.load(named: "ToyCar") {
+            showTextureUnlit(body)
             car.addChild(body)
             addMovingParts(to: car, layout: .scanned, palette: palette)
         } else {
@@ -42,6 +43,21 @@ enum CarModelFactory {
         container.addChild(car)
         container.scale = SIMD3(repeating: realLength)
         return container
+    }
+
+    /// Die Scan-Textur enthält das echte Licht schon. Zusätzlich von der (oft dunklen) Umgebung
+    /// beleuchtet, wirkte die Karosserie viel zu dunkel – unbeleuchtet sieht sie aus wie auf den Fotos.
+    private static func showTextureUnlit(_ entity: Entity) {
+        if var model = entity.components[ModelComponent.self] {
+            model.materials = model.materials.map { material in
+                guard let lit = material as? PhysicallyBasedMaterial else { return material }
+                var unlit = UnlitMaterial()
+                unlit.color = .init(tint: .white, texture: lit.baseColor.texture)
+                return unlit
+            }
+            entity.components.set(model)
+        }
+        entity.children.forEach(showTextureUnlit)
     }
 
     // MARK: - Lage der beweglichen Teile

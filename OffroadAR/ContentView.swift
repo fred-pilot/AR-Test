@@ -40,7 +40,7 @@ struct ContentView: View {
         case .placing:
             "Auto einlernen (einmalig), Schritt 1 von 3: Stell das Auto auf Boden oder Tisch und tippe es auf dem Bildschirm an."
         case .aligning:
-            "Schritt 2 von 3: Schieb das Modell mit einem Finger und dreh es mit zwei Fingern, bis es genau auf dem Auto sitzt."
+            "Schritt 2 von 3: Schieb das Modell mit einem Finger, dreh es mit zwei Fingern. Feinjustieren mit den Knöpfen, bis es genau auf dem Auto sitzt."
         case .scanning:
             "Schritt 3 von 3: Geh langsam einmal ganz um das Auto herum, etwa 30–50 cm entfernt und leicht von oben."
         case .saving:
@@ -62,10 +62,7 @@ private struct TeachControls: View {
         VStack(spacing: 12) {
             switch controller.phase {
             case .aligning:
-                Button("Passt") {
-                    controller.confirmAlignment()
-                }
-                .buttonStyle(.borderedProminent)
+                AlignControls()
             case .scanning, .saving:
                 ProgressView(value: controller.scanProgress) {
                     Text("Rundgang: \(Int(controller.scanProgress * 100)) %")
@@ -90,6 +87,44 @@ private struct TeachControls: View {
     }
 }
 
+/// Feinjustieren beim Einlernen. Gedrückt halten wiederholt den Schritt.
+private struct AlignControls: View {
+    @EnvironmentObject private var controller: ARController
+
+    var body: some View {
+        VStack(spacing: 10) {
+            HStack(spacing: 10) {
+                step("rotate.left", "Nach links drehen") { controller.rotateGhost(degrees: 1) }
+                step("rotate.right", "Nach rechts drehen") { controller.rotateGhost(degrees: -1) }
+                Button("Wenden") { controller.rotateGhost(degrees: 180) }
+                    .buttonStyle(.bordered)
+            }
+            HStack(spacing: 10) {
+                step("arrow.left", "Nach links") { controller.nudgeGhost(forward: 0, right: -1) }
+                step("arrow.up", "Weg von mir") { controller.nudgeGhost(forward: 1, right: 0) }
+                step("arrow.down", "Zu mir hin") { controller.nudgeGhost(forward: -1, right: 0) }
+                step("arrow.right", "Nach rechts") { controller.nudgeGhost(forward: 0, right: 1) }
+            }
+            HStack(spacing: 10) {
+                Button("Neu antippen") { controller.placeAgain() }
+                    .buttonStyle(.bordered)
+                Button("Passt") { controller.confirmAlignment() }
+                    .buttonStyle(.borderedProminent)
+            }
+        }
+    }
+
+    private func step(_ symbol: String, _ label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .frame(width: 28, height: 22)
+        }
+        .buttonStyle(.bordered)
+        .buttonRepeatBehavior(.enabled)
+        .accessibilityLabel(label)
+    }
+}
+
 private struct PlayControls: View {
     @EnvironmentObject private var controller: ARController
 
@@ -104,6 +139,11 @@ private struct PlayControls: View {
 
             if controller.supportsLiDAR {
                 Toggle("Verdeckung durch Umgebung (LiDAR)", isOn: $controller.environmentOcclusion)
+                    .font(.footnote)
+            }
+
+            if controller.followsWithMotionTracker {
+                Toggle("Echtzeit-Nachführen", isOn: $controller.fastFollow)
                     .font(.footnote)
             }
 

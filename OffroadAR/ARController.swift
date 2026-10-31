@@ -11,10 +11,11 @@ import UIKit
 /// Ursprung genau auf dem ausgerichteten Modell liegt. Ab dann erkennt ARKit das Auto bei jedem
 /// Start von selbst, und das animierte Modell sitzt ohne Verschiebung darauf.
 ///
-/// Eingelernte Objekte erkennt ARKit nur, es verfolgt sie nicht Bild für Bild. Damit das Modell
-/// trotzdem mitkommt, wenn das Auto geschoben wird, lässt die App das Auto laufend neu suchen.
-/// Liegt ein in Create ML trainiertes `ToyCar.referenceobject` in der App, wird stattdessen
-/// dieses in jedem Kamerabild verfolgt.
+/// Eingelernte Objekte erkennt ARKit nur, es verfolgt sie nicht Bild für Bild. Bewegt sich das Auto,
+/// führt der `MotionTracker` das Modell in Echtzeit nach. ARKit sucht das Auto zusätzlich laufend
+/// neu und korrigiert die Lage, sobald es wieder stillsteht.
+/// Liegt ein in Create ML trainiertes `ToyCar.referenceobject` in der App, verfolgt ARKit stattdessen
+/// dieses selbst in jedem Kamerabild.
 @MainActor
 final class ARController: NSObject, ObservableObject {
     enum Phase: Equatable {
@@ -35,12 +36,15 @@ final class ARController: NSObject, ObservableObject {
     @Published var wheelsOn = true
     @Published var wipersOn = true
     @Published var lightsOn = true
+    /// Echtzeit-Nachführen mit dem optischen Fluss (zum Vergleichen abschaltbar).
+    @Published var fastFollow = true
     @Published var environmentOcclusion = false {
         didSet { if environmentOcclusion != oldValue && isRunning { startSession() } }
     }
 
     var isTeaching: Bool { [.placing, .aligning, .scanning, .saving].contains(phase) }
     var isRunning: Bool { !isTeaching }
+    var followsWithMotionTracker: Bool { mode == .detection }
 
     /// Ab so viel Rundgang darf man das Einlernen beenden, bei 100 % geht es von selbst weiter.
     let minimumScanProgress = 0.75
@@ -54,33 +58,51 @@ final class ARController: NSObject, ObservableObject {
 
     /// So lange bleibt das Modell nach einem kurzen Tracking-Aussetzer stehen, bevor es verschwindet.
     private let lostGracePeriod: TimeInterval = 0.5
-    /// Nach dieser Zeit wird ein erkanntes Auto vergessen, damit ARKit es neu sucht und eine
-    /// verschobene Position bemerkt.
+    /// Nach dieser Zeit wird ein erkanntes Auto vergessen, damit ARKit es neu sucht.
     private let redetectInterval: TimeInterval = 0.8
-    /// Kleinere Unterschiede zwischen zwei Erkennungen sind Messrauschen – das Modell bleibt ruhig.
+    /// Kleinere Unterschiede zwischen Erkennung und angezeigter Lage sind Messrauschen.
     private let moveThreshold: Float = 0.004
     private let turnThreshold: Float = 3 * .pi / 180
+    /// ARKit-Erkennungen kommen verzögert an. Während das Auto fährt, würden sie es zurückziehen,
+    /// darum korrigieren sie erst, wenn es so lange stillsteht.
+    private let stillTimeBeforeCorrection: TimeInterval = 0.5
+    /// Steht das Auto, wird das Vergleichsbild für den optischen Fluss spätestens so oft erneuert.
+    private let keyframeMaxAge: TimeInterval = 0.5
+    /// Zeitkonstante, mit der das angezeigte Modell der gemessenen Lage folgt (glättet Zittern).
+    private let smoothing: Float = 0.035
     private let scanSectors = 16
+    /// Schrittweite der Feinjustier-Knöpfe beim Einlernen.
+    private let nudgeStep: Float = 0.002
 
     private var mode = Mode.detection
     private var sessionID = 0
     private var updateSubscription: Any?
     private var started = false
 
-    /// Das animierte Auto: `worldAnchor` → `pose` (Lage des echten Autos) → Modell in echter Größe.
+    /// Das animierte Auto: `worldAnchor` → `carPose` (Lage des echten Autos) → Modell in echter Größe.
     private var worldAnchor: AnchorEntity?
     private var carPose: Entity?
     private var animator: CarAnimator?
     private var lostSince: TimeInterval?
-    private var hasPose = false
+    /// Die gemessene Lage des Autos. Das angezeigte Modell folgt ihr geglättet.
+    private var trackedPose: simd_float4x4?
+
+    private var motionTracker: MotionTracker?
+    private var keyframe: MotionTracker.Frame?
+    private var motionBusy = false
+    private var lastMotion: TimeInterval = 0
 
     /// Das halbdurchsichtige Modell beim Einlernen. Seine Lage wird zum Ursprung des Referenzobjekts.
     private var ghost: AnchorEntity?
     private var coveredSectors = Set<Int>()
+    private var lastPanHit: SIMD3<Float>?
+    private var isRotating = false
 
     override init() {
         super.init()
         arView.session.delegate = self
+        // Die beweglichen Teile (Räder, Wischer, Lichter) werden von der Umgebung beleuchtet – etwas heller.
+        arView.environment.lighting.intensityExponent = 1
         updateSubscription = arView.scene.subscribe(to: SceneEvents.Update.self) { [weak self] event in
             MainActor.assumeIsolated {
                 self?.tick(deltaTime: Float(event.deltaTime))
@@ -122,8 +144,11 @@ final class ARController: NSObject, ObservableObject {
         worldAnchor = nil
         carPose = nil
         animator = nil
+        trackedPose = nil
+        motionTracker = nil
+        keyframe = nil
+        motionBusy = false
         ghost = nil
-        hasPose = false
         lostSince = nil
         message = nil
 
@@ -148,11 +173,11 @@ final class ARController: NSObject, ObservableObject {
         case .tracking:
             // Verfolgung in jedem Kamerabild – das Modell bleibt am Auto, auch wenn es geschoben wird.
             config.trackingObjects = [referenceObject]
-            if let format = Self.fastestVideoFormat() {
-                config.videoFormat = format
-            }
         case .detection:
             config.detectionObjects = [referenceObject]
+        }
+        if let format = Self.fastestVideoFormat() {
+            config.videoFormat = format
         }
         config.environmentTexturing = .automatic
         if supportsLiDAR && environmentOcclusion {
@@ -175,6 +200,9 @@ final class ARController: NSObject, ObservableObject {
         worldAnchor = anchor
         carPose = pose
         animator = CarAnimator(root: car)
+        if mode == .detection {
+            motionTracker = MotionTracker(samples: MotionTracker.samples(of: car, relativeTo: pose))
+        }
 
         phase = .searching
     }
@@ -204,7 +232,20 @@ final class ARController: NSObject, ObservableObject {
         if mode == .tracking, let lostSince, CACurrentMediaTime() - lostSince > lostGracePeriod {
             carPose?.isEnabled = false
         }
+        if mode == .detection, let target = trackedPose, let carPose {
+            let goal = Transform(matrix: target)
+            let k = 1 - exp(-deltaTime / smoothing)
+            var shown = carPose.transform
+            shown.translation = simd_mix(shown.translation, goal.translation, SIMD3(repeating: k))
+            shown.rotation = simd_slerp(shown.rotation, goal.rotation, k)
+            carPose.transform = shown
+        }
         animator?.update(deltaTime: deltaTime, wheels: wheelsOn, wipers: wipersOn, lights: lightsOn)
+    }
+
+    /// Nur bei Änderung setzen, sonst würde die Oberfläche bei jedem Kamerabild neu gezeichnet.
+    private func setPhase(_ newPhase: Phase) {
+        if phase != newPhase { phase = newPhase }
     }
 
     // MARK: - Erkennen
@@ -224,31 +265,30 @@ final class ARController: NSObject, ObservableObject {
             }
         case .detection:
             guard isNew else { return }
-            move(carPose, to: Transform(matrix: objectAnchor.transform))
+            correct(to: objectAnchor.transform)
             carPose.isEnabled = true
             setPhase(.found)
             forgetLater(objectAnchor)
         }
     }
 
-    /// Nur bei Änderung setzen, sonst würde die Oberfläche bei jedem Kamerabild neu gezeichnet.
-    private func setPhase(_ newPhase: Phase) {
-        if phase != newPhase { phase = newPhase }
-    }
-
-    /// Erste Erkennung: sofort hinsetzen. Danach nur echte Bewegungen sanft nachziehen.
-    private func move(_ entity: Entity, to target: Transform) {
-        guard hasPose else {
-            entity.transform = target
-            hasPose = true
+    /// Erste Erkennung: sofort hinsetzen. Danach nur korrigieren, wenn das Auto steht und die
+    /// Erkennung deutlich von der nachgeführten Lage abweicht.
+    private func correct(to detected: simd_float4x4) {
+        guard let current = trackedPose else {
+            trackedPose = detected
+            carPose?.transform = Transform(matrix: detected)
             return
         }
-        let current = entity.transform
-        let distance = simd_distance(current.translation, target.translation)
-        let delta = simd_mul(current.rotation.inverse, target.rotation)
+        if fastFollow && CACurrentMediaTime() - lastMotion < stillTimeBeforeCorrection { return }
+        let a = Transform(matrix: current), b = Transform(matrix: detected)
+        let distance = simd_distance(a.translation, b.translation)
+        let delta = simd_mul(a.rotation.inverse, b.rotation)
         let angle = 2 * acos(min(1, abs(delta.real)))
         guard distance > moveThreshold || angle > turnThreshold else { return }
-        entity.move(to: target, relativeTo: entity.parent, duration: 0.25, timingFunction: .easeInOut)
+        trackedPose = detected
+        // Das Vergleichsbild gehört zur alten Lage – neu anfangen.
+        keyframe = nil
     }
 
     /// ARKit meldet ein eingelerntes Objekt nur einmal und hält es dann fest. Wird der Anker
@@ -260,6 +300,48 @@ final class ARController: NSObject, ObservableObject {
                 guard let self, self.sessionID == id else { return }
                 self.arView.session.remove(anchor: anchor)
             }
+        }
+    }
+
+    // MARK: - Echtzeit-Nachführen
+
+    private func followMotion(in frame: ARFrame) {
+        guard mode == .detection, fastFollow, phase == .found, !motionBusy,
+              let pose = trackedPose, let motionTracker,
+              case .normal = frame.camera.trackingState else { return }
+        let current = MotionTracker.Frame(image: frame.capturedImage, camera: frame.camera, time: frame.timestamp)
+        guard let keyframe else {
+            self.keyframe = current
+            return
+        }
+        motionBusy = true
+        let id = sessionID
+        motionTracker.track(from: keyframe, to: current, pose: pose) { [weak self] outcome in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self, self.sessionID == id else { return }
+                    self.motionBusy = false
+                    self.apply(outcome, at: current)
+                }
+            }
+        }
+    }
+
+    private func apply(_ outcome: MotionTracker.Outcome, at frame: MotionTracker.Frame) {
+        switch outcome {
+        case .moved(let delta):
+            if let pose = trackedPose {
+                trackedPose = delta * pose
+            }
+            keyframe = frame
+            lastMotion = CACurrentMediaTime()
+        case .still:
+            // Vergleichsbild behalten, so summieren sich auch langsame Bewegungen über die Rauschschwelle.
+            if let keyframe, frame.time - keyframe.time > keyframeMaxAge {
+                self.keyframe = frame
+            }
+        case .lost:
+            keyframe = frame
         }
     }
 
@@ -280,8 +362,10 @@ final class ARController: NSObject, ObservableObject {
         phase = .placing
     }
 
+    /// Nur im ersten Schritt: Antippen setzt das Modell aufs Auto. Danach wird nur noch justiert,
+    /// damit ein versehentliches Tippen die Ausrichtung nicht zurücksetzt.
     @objc private func handleTap(_ recognizer: UITapGestureRecognizer) {
-        guard phase == .placing || phase == .aligning,
+        guard phase == .placing,
               let hit = floorHit(at: recognizer.location(in: arView)),
               let camera = arView.session.currentFrame?.camera else { return }
 
@@ -304,17 +388,61 @@ final class ARController: NSObject, ObservableObject {
         phase = .aligning
     }
 
+    /// Ein Finger verschiebt das Modell um so viel, wie sich der Finger auf dem Boden bewegt –
+    /// es springt also nicht unter den Finger.
     @objc private func handlePan(_ recognizer: UIPanGestureRecognizer) {
-        guard phase == .aligning, let ghost,
-              let hit = floorHit(at: recognizer.location(in: arView)) else { return }
-        ghost.position = hit
+        guard phase == .aligning, let ghost, !isRotating, recognizer.numberOfTouches == 1,
+              recognizer.state == .began || recognizer.state == .changed,
+              let hit = floorHit(at: recognizer.location(in: arView)) else {
+            lastPanHit = nil
+            return
+        }
+        if let last = lastPanHit {
+            ghost.position += SIMD3(hit.x - last.x, 0, hit.z - last.z)
+        }
+        lastPanHit = hit
     }
 
     @objc private func handleRotation(_ recognizer: UIRotationGestureRecognizer) {
-        guard phase == .aligning, let ghost else { return }
+        switch recognizer.state {
+        case .began, .changed:
+            isRotating = true
+            lastPanHit = nil
+        default:
+            isRotating = false
+        }
+        guard phase == .aligning else { return }
         // Bildschirm-Drehung im Uhrzeigersinn = Drehung im Uhrzeigersinn von oben gesehen.
-        ghost.orientation = simd_quatf(angle: -Float(recognizer.rotation), axis: [0, 1, 0]) * ghost.orientation
+        rotateGhost(by: -Float(recognizer.rotation))
         recognizer.rotation = 0
+    }
+
+    /// Dreht das Modell gegen den Uhrzeigersinn (von oben gesehen), in Grad.
+    func rotateGhost(degrees: Float) {
+        guard phase == .aligning else { return }
+        rotateGhost(by: degrees * .pi / 180)
+    }
+
+    private func rotateGhost(by angle: Float) {
+        guard let ghost else { return }
+        ghost.orientation = simd_quatf(angle: angle, axis: [0, 1, 0]) * ghost.orientation
+    }
+
+    /// Verschiebt das Modell in Millimeterschritten, bezogen auf die Blickrichtung der Kamera
+    /// (`forward` = vom Betrachter weg, `right` = nach rechts).
+    func nudgeGhost(forward: Float, right: Float) {
+        guard phase == .aligning, let ghost, let camera = arView.session.currentFrame?.camera else { return }
+        let back = camera.transform.columns.2, side = camera.transform.columns.0
+        let ahead = simd_normalize(SIMD2(-back.x, -back.z))
+        let rightward = simd_normalize(SIMD2(side.x, side.z))
+        let move = (ahead * forward + rightward * right) * nudgeStep
+        ghost.position += SIMD3(move.x, 0, move.y)
+    }
+
+    /// Zurück zu Schritt 1: Das nächste Antippen setzt das Modell neu.
+    func placeAgain() {
+        guard phase == .aligning else { return }
+        phase = .placing
     }
 
     private func floorHit(at point: CGPoint) -> SIMD3<Float>? {
@@ -366,8 +494,8 @@ final class ARController: NSObject, ObservableObject {
         let id = sessionID
 
         arView.session.createReferenceObject(transform: ghost.transformMatrix(relativeTo: nil),
-                                             center: center, extent: extent) { object, error in
-            Task { @MainActor [weak self] in
+                                             center: center, extent: extent) { [weak self] object, error in
+            Task { @MainActor in
                 guard let self, self.sessionID == id else { return }
                 self.saveLearned(object, error: error)
             }
@@ -404,6 +532,12 @@ extension ARController: UIGestureRecognizerDelegate {
 }
 
 extension ARController: ARSessionDelegate {
+    nonisolated func session(_ session: ARSession, didUpdate frame: ARFrame) {
+        MainActor.assumeIsolated {
+            followMotion(in: frame)
+        }
+    }
+
     nonisolated func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
         MainActor.assumeIsolated {
             for case let objectAnchor as ARObjectAnchor in anchors {
