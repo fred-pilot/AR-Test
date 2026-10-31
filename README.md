@@ -17,6 +17,7 @@ passgenau darüberlegt: Die Reifen drehen sich, die Scheibenwischer wischen, War
 |---|---|
 | `OffroadAR/ARController.swift` | AR-Session: Einlernen, Erkennen und Nachführen des Autos |
 | `OffroadAR/MotionTracker.swift` | Echtzeit-Nachführen zwischen zwei Erkennungen (optischer Fluss) |
+| `OffroadAR/AutoAligner.swift` | Passt das Modell beim Einlernen automatisch an die Messpunkte am echten Auto an (ICP) |
 | `OffroadAR/ContentView.swift` | Oberfläche: Anleitung beim Einlernen, Schalter für die Animationen |
 | `OffroadAR/ToyCar.usdz` | Die gescannte Karosserie (aus deinem Foto-Scan, ausgerichtet und bereinigt) |
 | `OffroadAR/CarModelFactory.swift` | Lädt die Karosserie und setzt Räder, Wischer und Lichter an die vermessenen Stellen |
@@ -48,8 +49,12 @@ nur zu diesem einen Scan. Die `0.102` ist die echte Länge in Metern und muss zu
 
 ### Die Erkennung
 Beim Einlernen entsteht ein ARKit-Referenzobjekt (`ToyCar.arobject`) in den App-Daten. Sein Ursprung ist
-genau die Stelle, an die du das Modell gelegt hast. Darum sitzt das animierte Modell später ohne
+genau die Stelle, an der das Modell am Ende liegt. Darum sitzt das animierte Modell später ohne
 Korrektur auf dem erkannten Auto. Liegt es nicht genau, hilft **Neu einlernen**.
+
+Die Hand-Ausrichtung muss nur ungefähr stimmen: Beim Rundgang sammelt ARKit Messpunkte auf dem echten Auto,
+und die App schiebt und dreht das Modell so, dass seine Oberfläche möglichst genau durch diese Punkte geht
+(ICP). Höhe und Boden kommen aus der von ARKit erkannten Bodenfläche.
 
 ARKit erkennt so ein eingelerntes Objekt nur, es verfolgt es nicht Bild für Bild. Darum misst die App die
 Bewegung selbst: Punkte des Modells werden ins Kamerabild projiziert, Apples optischer Fluss (Vision) zeigt,
@@ -103,11 +108,13 @@ nicht mehr auf dem MacBook Pro 2017. Darum baut GitHub die App in der Cloud.
 
 Beim ersten Start (einmalig):
 1. Auto auf Boden oder Tisch stellen, gutes Licht, möglichst nichts anderes direkt daneben.
-2. Das Auto auf dem Bildschirm antippen. Ein halbdurchsichtiges Modell erscheint.
-3. Mit einem Finger schieben, mit zwei Fingern drehen. Feinjustieren mit den Knöpfen (Drehen in 1°-Schritten,
-   **Wenden** um 180°, Pfeile in 2-mm-Schritten, gedrückt halten wiederholt). Sitzt das Modell genau auf dem Auto: **Passt**.
-4. Langsam einmal ganz um das Auto herumgehen, 30 bis 50 cm entfernt und leicht von oben.
-   Bei 100 % speichert die App von selbst (ab 75 % geht auch **Fertig**).
+2. iPhone kurz hin und her bewegen (damit ARKit den Boden erkennt), dann das Auto antippen. Ein halbdurchsichtiges Modell erscheint.
+3. Ungefähr ausrichten: ein Finger schiebt, zwei Finger drehen, Zusammenziehen ändert die Größe. Dazu Knöpfe
+   (Drehen in 1°-Schritten, **Wenden** um 180°, Pfeile in 2-mm-Schritten in Bildschirmrichtung, Größe in 1-%-Schritten;
+   gedrückt halten wiederholt). Dann **Passt**.
+4. Langsam um das Auto herumgehen, 20 bis 40 cm entfernt: einmal flach von der Seite, einmal schräg von oben.
+   Das Modell rastet dabei selbst auf dem Auto ein. Sind beide Balken voll, speichert die App von selbst
+   (ab 70 % geht auch **Fertig**).
 
 Danach bei jedem Start: Kamera aufs Auto richten, das Modell erscheint von selbst.
 

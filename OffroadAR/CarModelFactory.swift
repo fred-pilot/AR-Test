@@ -37,11 +37,11 @@ enum CarModelFactory {
     /// Bringt das Auto auf echte Größe. Das Trainingsmodell für die Erkennung liegt im selben
     /// Koordinatensystem (nur mit `realLength` skaliert), und beim Einlernen am iPhone wird das
     /// Referenzobjekt genau an diesem Modell ausgerichtet. Deshalb sitzt das Modell ohne weitere
-    /// Verschiebung auf dem erkannten Auto.
-    static func placedAtRealSize(_ car: Entity) -> Entity {
+    /// Verschiebung auf dem erkannten Auto. `scale` ist die Größenkorrektur aus dem Einlernen (1 = 10,2 cm).
+    static func placedAtRealSize(_ car: Entity, scale: Float = 1) -> Entity {
         let container = Entity()
         container.addChild(car)
-        container.scale = SIMD3(repeating: realLength)
+        container.scale = SIMD3(repeating: realLength * scale)
         return container
     }
 

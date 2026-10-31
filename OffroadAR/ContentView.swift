@@ -9,8 +9,15 @@ struct ContentView: View {
                 .ignoresSafeArea()
 
             VStack(spacing: 12) {
-                Text(controller.message ?? instruction)
-                    .font(.callout)
+                VStack(spacing: 6) {
+                    Text(controller.message ?? instruction)
+                        .font(.callout)
+                    if let note = controller.note {
+                        Text(note)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
                     .multilineTextAlignment(.center)
                     .padding(10)
                     .frame(maxWidth: .infinity)
@@ -38,11 +45,11 @@ struct ContentView: View {
     private var instruction: String {
         switch controller.phase {
         case .placing:
-            "Auto einlernen (einmalig), Schritt 1 von 3: Stell das Auto auf Boden oder Tisch und tippe es auf dem Bildschirm an."
+            "Auto einlernen (einmalig), Schritt 1 von 3: Stell das Auto auf Boden oder Tisch, beweg das iPhone kurz hin und her und tippe dann aufs Auto."
         case .aligning:
-            "Schritt 2 von 3: Schieb das Modell mit einem Finger, dreh es mit zwei Fingern. Feinjustieren mit den Knöpfen, bis es genau auf dem Auto sitzt."
+            "Schritt 2 von 3: Ein Finger schiebt, zwei Finger drehen, Zusammenziehen ändert die Größe. Ungefähr reicht – beim Rundgang passt die App das Modell selbst genau an."
         case .scanning:
-            "Schritt 3 von 3: Geh langsam einmal ganz um das Auto herum, etwa 30–50 cm entfernt und leicht von oben."
+            "Schritt 3 von 3: Geh langsam um das Auto herum, 20–40 cm entfernt – einmal flach von der Seite und einmal schräg von oben."
         case .saving:
             "Speichere das Auto …"
         case .searching:
@@ -64,8 +71,12 @@ private struct TeachControls: View {
             case .aligning:
                 AlignControls()
             case .scanning, .saving:
-                ProgressView(value: controller.scanProgress) {
-                    Text("Rundgang: \(Int(controller.scanProgress * 100)) %")
+                ProgressView(value: controller.lowAngleProgress) {
+                    Text("Flach von der Seite: \(Int(controller.lowAngleProgress * 100)) %")
+                        .font(.footnote)
+                }
+                ProgressView(value: controller.highAngleProgress) {
+                    Text("Schräg von oben: \(Int(controller.highAngleProgress * 100)) %")
                         .font(.footnote)
                 }
                 Button("Fertig") {
@@ -98,6 +109,14 @@ private struct AlignControls: View {
                 step("rotate.right", "Nach rechts drehen") { controller.rotateGhost(degrees: -1) }
                 Button("Wenden") { controller.rotateGhost(degrees: 180) }
                     .buttonStyle(.bordered)
+            }
+            HStack(spacing: 10) {
+                step("minus", "Kleiner") { controller.resizeGhost(percent: -1) }
+                Text("Größe \(Int((controller.ghostScale * 100).rounded())) %")
+                    .font(.footnote)
+                    .monospacedDigit()
+                    .frame(minWidth: 90)
+                step("plus", "Größer") { controller.resizeGhost(percent: 1) }
             }
             HStack(spacing: 10) {
                 step("arrow.left", "Nach links") { controller.nudgeGhost(forward: 0, right: -1) }

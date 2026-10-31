@@ -27,10 +27,16 @@ final class ARController: NSObject, ObservableObject {
     let supportsLiDAR = ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh)
 
     @Published private(set) var phase = Phase.searching
-    /// Wie viel vom Rundgang ums Auto beim Einlernen geschafft ist (0…1).
+    /// Wie viel vom Rundgang ums Auto beim Einlernen geschafft ist (0…1), insgesamt und je Blickhöhe.
     @Published private(set) var scanProgress = 0.0
+    @Published private(set) var lowAngleProgress = 0.0
+    @Published private(set) var highAngleProgress = 0.0
+    /// Größenkorrektur des Modells beim Einlernen (1 = 10,2 cm).
+    @Published private(set) var ghostScale: Float = 1
     /// Fehlermeldung oder Hinweis, der die normale Anleitung ersetzt.
     @Published private(set) var message: String?
+    /// Zusatzinfo unter der Anleitung, z. B. wie gut die automatische Anpassung passt.
+    @Published private(set) var note: String?
     @Published private(set) var canRelearn = false
 
     @Published var wheelsOn = true
@@ -47,7 +53,7 @@ final class ARController: NSObject, ObservableObject {
     var followsWithMotionTracker: Bool { mode == .detection }
 
     /// Ab so viel Rundgang darf man das Einlernen beenden, bei 100 % geht es von selbst weiter.
-    let minimumScanProgress = 0.75
+    let minimumScanProgress = 0.7
 
     private enum Mode {
         /// Trainiertes `.referenceobject`: Verfolgung in jedem Kamerabild.
@@ -70,9 +76,15 @@ final class ARController: NSObject, ObservableObject {
     private let keyframeMaxAge: TimeInterval = 0.5
     /// Zeitkonstante, mit der das angezeigte Modell der gemessenen Lage folgt (glättet Zittern).
     private let smoothing: Float = 0.035
-    private let scanSectors = 16
+    /// Rundgang: je 12 Richtungen ringsum, einmal flach von der Seite und einmal schräg von oben.
+    private let ringSectors = 12
     /// Schrittweite der Feinjustier-Knöpfe beim Einlernen.
     private let nudgeStep: Float = 0.002
+    private let scaleRange: ClosedRange<Float> = 0.8...1.25
+    /// Mittlerer Abstand der Messpunkte zum Modell, bis zu dem die automatische Anpassung gilt.
+    private let maxFitError: Float = 0.005
+    /// Weiter darf die automatische Anpassung das Modell nicht von der Hand-Ausrichtung wegschieben.
+    private let maxFitShift: Float = 0.05
 
     private var mode = Mode.detection
     private var sessionID = 0
@@ -94,9 +106,19 @@ final class ARController: NSObject, ObservableObject {
 
     /// Das halbdurchsichtige Modell beim Einlernen. Seine Lage wird zum Ursprung des Referenzobjekts.
     private var ghost: AnchorEntity?
-    private var coveredSectors = Set<Int>()
+    private var coveredCells = Set<Int>()
     private var lastPanHit: SIMD3<Float>?
     private var isRotating = false
+    private var isPinching = false
+    /// Höhe des Bodens (oder Tischs), auf dem das Auto steht.
+    private var floorY: Float?
+    /// Merkmalspunkte am echten Auto, die ARKit beim Rundgang gefunden hat (nach Kennung, in Weltkoordinaten).
+    private var featurePoints: [UInt64: SIMD3<Float>] = [:]
+    /// Punkte auf der Oberfläche des Modells, im Koordinatensystem des Geist-Modells.
+    private var modelSamples: [SIMD3<Float>] = []
+    private var manualPose: simd_float4x4?
+    private var lastAutoFit: TimeInterval = 0
+    private var fitBusy = false
 
     override init() {
         super.init()
@@ -113,7 +135,8 @@ final class ARController: NSObject, ObservableObject {
         let pan = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
         pan.maximumNumberOfTouches = 1
         let rotate = UIRotationGestureRecognizer(target: self, action: #selector(handleRotation(_:)))
-        for recognizer in [tap, pan, rotate] as [UIGestureRecognizer] {
+        let pinch = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
+        for recognizer in [tap, pan, rotate, pinch] as [UIGestureRecognizer] {
             recognizer.delegate = self
             arView.addGestureRecognizer(recognizer)
         }
@@ -151,6 +174,7 @@ final class ARController: NSObject, ObservableObject {
         ghost = nil
         lostSince = nil
         message = nil
+        note = nil
 
         if let trained = ReferenceObjectLibrary.loadTrained() {
             mode = .tracking
@@ -193,7 +217,8 @@ final class ARController: NSObject, ObservableObject {
         let anchor = AnchorEntity(world: matrix_identity_float4x4)
         let pose = Entity()
         let car = CarModelFactory.makeCar()
-        pose.addChild(CarModelFactory.placedAtRealSize(car))
+        let scale = mode == .detection ? ReferenceObjectLibrary.learnedScale : 1
+        pose.addChild(CarModelFactory.placedAtRealSize(car, scale: scale))
         pose.isEnabled = false
         anchor.addChild(pose)
         arView.scene.addAnchor(anchor)
@@ -357,17 +382,57 @@ final class ARController: NSObject, ObservableObject {
         config.planeDetection = .horizontal
         arView.session.run(config, options: [.resetTracking, .removeExistingAnchors])
         applyOcclusion()
-        coveredSectors.removeAll()
-        scanProgress = 0
+        ghostScale = 1
+        floorY = nil
+        resetScan()
         phase = .placing
+    }
+
+    private func resetScan() {
+        coveredCells.removeAll()
+        scanProgress = 0
+        lowAngleProgress = 0
+        highAngleProgress = 0
+        featurePoints.removeAll()
+        modelSamples = []
+        manualPose = nil
+        lastAutoFit = 0
+        note = nil
+    }
+
+    private var carSize: SIMD3<Float> { CarModelFactory.realSize * ghostScale }
+
+    /// Höhe des Bodens unter dem angetippten Auto. Der Sehstrahl durchs Auto trifft vielleicht zuerst
+    /// eine Fläche auf dem Autodach und erst dahinter den Boden – darum zählt die tiefste Fläche.
+    private func floorHeight(at point: CGPoint) -> Float? {
+        var results = arView.raycast(from: point, allowing: .existingPlaneGeometry, alignment: .horizontal)
+        if results.isEmpty {
+            results = arView.raycast(from: point, allowing: .estimatedPlane, alignment: .horizontal)
+        }
+        return results.map { $0.worldTransform.columns.3.y }.min()
+    }
+
+    /// Wo der Sehstrahl durch `point` die halbe Autohöhe erreicht. Dort liegt die Mitte des Autos,
+    /// das man antippt – der Boden dahinter wäre ein paar Zentimeter zu weit weg. Zurück kommt der
+    /// Punkt auf dem Boden darunter.
+    private func carCenterHit(at point: CGPoint) -> SIMD3<Float>? {
+        guard let floorY else { return nil }
+        let plane = Transform(translation: [0, floorY + carSize.y / 2, 0]).matrix
+        guard let hit = arView.unproject(point, ontoPlane: plane) else { return nil }
+        return [hit.x, floorY, hit.z]
     }
 
     /// Nur im ersten Schritt: Antippen setzt das Modell aufs Auto. Danach wird nur noch justiert,
     /// damit ein versehentliches Tippen die Ausrichtung nicht zurücksetzt.
     @objc private func handleTap(_ recognizer: UITapGestureRecognizer) {
-        guard phase == .placing,
-              let hit = floorHit(at: recognizer.location(in: arView)),
-              let camera = arView.session.currentFrame?.camera else { return }
+        guard phase == .placing, let camera = arView.session.currentFrame?.camera else { return }
+        let point = recognizer.location(in: arView)
+        guard let floor = floorHeight(at: point) else {
+            message = "Der Boden ist noch nicht erkannt. Beweg das iPhone etwas hin und her und tippe dann noch einmal aufs Auto."
+            return
+        }
+        floorY = floor
+        guard let hit = carCenterHit(at: point) else { return }
 
         // Die Front des Modells zeigt zur Kamera – meist muss man dann nur noch wenig drehen.
         let forward = -SIMD3<Float>(camera.transform.columns.2.x, 0, camera.transform.columns.2.z)
@@ -378,7 +443,7 @@ final class ARController: NSObject, ObservableObject {
             ghost.transform = transform
         } else {
             let ghost = AnchorEntity(world: transform.matrix)
-            let model = CarModelFactory.placedAtRealSize(CarModelFactory.makeCar())
+            let model = CarModelFactory.placedAtRealSize(CarModelFactory.makeCar(), scale: ghostScale)
             model.components.set(OpacityComponent(opacity: 0.6))
             ghost.addChild(model)
             arView.scene.addAnchor(ghost)
@@ -388,12 +453,12 @@ final class ARController: NSObject, ObservableObject {
         phase = .aligning
     }
 
-    /// Ein Finger verschiebt das Modell um so viel, wie sich der Finger auf dem Boden bewegt –
+    /// Ein Finger verschiebt das Modell um so viel, wie sich der Finger bewegt –
     /// es springt also nicht unter den Finger.
     @objc private func handlePan(_ recognizer: UIPanGestureRecognizer) {
-        guard phase == .aligning, let ghost, !isRotating, recognizer.numberOfTouches == 1,
+        guard phase == .aligning, let ghost, !isRotating, !isPinching, recognizer.numberOfTouches == 1,
               recognizer.state == .began || recognizer.state == .changed,
-              let hit = floorHit(at: recognizer.location(in: arView)) else {
+              let hit = carCenterHit(at: recognizer.location(in: arView)) else {
             lastPanHit = nil
             return
         }
@@ -417,6 +482,19 @@ final class ARController: NSObject, ObservableObject {
         recognizer.rotation = 0
     }
 
+    @objc private func handlePinch(_ recognizer: UIPinchGestureRecognizer) {
+        switch recognizer.state {
+        case .began, .changed:
+            isPinching = true
+            lastPanHit = nil
+        default:
+            isPinching = false
+        }
+        guard phase == .aligning else { return }
+        resizeGhost(by: Float(recognizer.scale))
+        recognizer.scale = 1
+    }
+
     /// Dreht das Modell gegen den Uhrzeigersinn (von oben gesehen), in Grad.
     func rotateGhost(degrees: Float) {
         guard phase == .aligning else { return }
@@ -428,14 +506,32 @@ final class ARController: NSObject, ObservableObject {
         ghost.orientation = simd_quatf(angle: angle, axis: [0, 1, 0]) * ghost.orientation
     }
 
-    /// Verschiebt das Modell in Millimeterschritten, bezogen auf die Blickrichtung der Kamera
-    /// (`forward` = vom Betrachter weg, `right` = nach rechts).
+    /// Macht das Modell um `percent` Prozent größer (negativ: kleiner).
+    func resizeGhost(percent: Float) {
+        guard phase == .aligning else { return }
+        resizeGhost(by: 1 + percent / 100)
+    }
+
+    private func resizeGhost(by factor: Float) {
+        ghostScale = min(scaleRange.upperBound, max(scaleRange.lowerBound, ghostScale * factor))
+        ghost?.children.first?.scale = SIMD3(repeating: CarModelFactory.realLength * ghostScale)
+    }
+
+    /// Verschiebt das Modell in Millimeterschritten so, wie die Pfeile auf dem Bildschirm zeigen
+    /// (`forward` = nach oben auf dem Bildschirm, also vom Betrachter weg; `right` = nach rechts).
     func nudgeGhost(forward: Float, right: Float) {
-        guard phase == .aligning, let ghost, let camera = arView.session.currentFrame?.camera else { return }
-        let back = camera.transform.columns.2, side = camera.transform.columns.0
-        let ahead = simd_normalize(SIMD2(-back.x, -back.z))
-        let rightward = simd_normalize(SIMD2(side.x, side.z))
-        let move = (ahead * forward + rightward * right) * nudgeStep
+        guard phase == .aligning, let ghost else { return }
+        let center = ghost.position + SIMD3(0, carSize.y / 2, 0)
+        guard let screen = arView.project(center) else { return }
+        let plane = Transform(translation: [0, center.y, 0]).matrix
+        guard let here = arView.unproject(screen, ontoPlane: plane),
+              let towardsRight = arView.unproject(CGPoint(x: screen.x + 40, y: screen.y), ontoPlane: plane),
+              let towardsTop = arView.unproject(CGPoint(x: screen.x, y: screen.y - 40), ontoPlane: plane)
+        else { return }
+        let rightward = SIMD2(towardsRight.x - here.x, towardsRight.z - here.z)
+        let away = SIMD2(towardsTop.x - here.x, towardsTop.z - here.z)
+        guard simd_length(rightward) > 1e-5, simd_length(away) > 1e-5 else { return }
+        let move = (simd_normalize(away) * forward + simd_normalize(rightward) * right) * nudgeStep
         ghost.position += SIMD3(move.x, 0, move.y)
     }
 
@@ -445,72 +541,153 @@ final class ARController: NSObject, ObservableObject {
         phase = .placing
     }
 
-    private func floorHit(at point: CGPoint) -> SIMD3<Float>? {
-        guard let result = arView.raycast(from: point, allowing: .estimatedPlane, alignment: .horizontal).first
-        else { return nil }
-        let c = result.worldTransform.columns.3
-        return [c.x, c.y, c.z]
-    }
-
-    /// „Passt“: Das Modell sitzt auf dem Auto, jetzt einmal herumgehen.
+    /// „Passt“: Das Modell sitzt ungefähr auf dem Auto, jetzt einmal herumgehen.
     func confirmAlignment() {
-        guard phase == .aligning, let ghost else { return }
-        ghost.children.first?.components.set(OpacityComponent(opacity: 0.25))
-        coveredSectors.removeAll()
-        scanProgress = 0
+        guard phase == .aligning, let ghost, let model = ghost.children.first else { return }
+        model.components.set(OpacityComponent(opacity: 0.35))
+        resetScan()
+        manualPose = ghost.transformMatrix(relativeTo: nil)
+        modelSamples = MotionTracker.samples(of: model, relativeTo: ghost, maxCount: 1500).map(\.position)
         message = nil
         phase = .scanning
     }
 
-    /// Zählt, aus welchen Richtungen das Auto schon aus passender Nähe gesehen wurde.
+    /// Zählt, aus welchen Richtungen und Höhen das Auto schon aus passender Nähe gesehen wurde.
     private func updateScanCoverage() {
         guard let ghost, let camera = arView.session.currentFrame?.camera,
               case .normal = camera.trackingState else { return }
         let c = camera.transform.columns.3
-        let local = ghost.convert(position: [c.x, c.y, c.z], from: nil)
+        var local = ghost.convert(position: [c.x, c.y, c.z], from: nil)
+        local.y -= carSize.y / 2
         let horizontal = simd_length(SIMD2(local.x, local.z))
         let elevation = atan2(local.y, horizontal)
-        guard horizontal > 0.08, horizontal < 0.8, elevation > 0.1, elevation < 1.4 else { return }
+        guard horizontal > 0.05, simd_length(local) < 0.8 else { return }
 
+        let ring: Int
+        switch elevation {
+        case 0.1..<0.6: ring = 0
+        case 0.6..<1.35: ring = 1
+        default: return
+        }
         let azimuth = atan2(local.x, local.z) + .pi
-        let sector = min(scanSectors - 1, Int(azimuth / (2 * .pi) * Float(scanSectors)))
-        guard coveredSectors.insert(sector).inserted else { return }
-        scanProgress = Double(coveredSectors.count) / Double(scanSectors)
-        if coveredSectors.count == scanSectors {
+        let sector = min(ringSectors - 1, Int(azimuth / (2 * .pi) * Float(ringSectors)))
+        guard coveredCells.insert(ring * ringSectors + sector).inserted else { return }
+
+        let low = coveredCells.filter { $0 < ringSectors }.count
+        lowAngleProgress = Double(low) / Double(ringSectors)
+        highAngleProgress = Double(coveredCells.count - low) / Double(ringSectors)
+        scanProgress = Double(coveredCells.count) / Double(2 * ringSectors)
+        if coveredCells.count == 2 * ringSectors {
             finishScan()
         }
     }
 
-    /// Erzeugt das Referenzobjekt aus allem, was beim Rundgang in der Box ums Modell gesehen wurde.
+    /// Sammelt Merkmalspunkte in der Nähe des Modells – das ist das echte Auto.
+    private func collectFeaturePoints(from frame: ARFrame) {
+        guard let ghost, let cloud = frame.rawFeaturePoints else { return }
+        let size = carSize
+        // Etwas Spielraum, die Hand-Ausrichtung kann ein paar Zentimeter danebenliegen.
+        let reach = SIMD2(size.x / 2 + 0.025, size.z / 2 + 0.025)
+        let toLocal = ghost.transformMatrix(relativeTo: nil).inverse
+        for (point, id) in zip(cloud.points, cloud.identifiers) {
+            guard featurePoints.count < 4000 || featurePoints[id] != nil else { continue }
+            let local = (toLocal * SIMD4(point, 1)).xyz
+            // Der Boden selbst bleibt draußen.
+            guard abs(local.x) < reach.x, abs(local.z) < reach.y,
+                  local.y > 0.004, local.y < size.y + 0.02 else { continue }
+            featurePoints[id] = point
+        }
+        autoFitIfDue()
+    }
+
+    /// Schon während des Rundgangs: Modell an die bisher gefundenen Punkte anpassen, damit man sieht,
+    /// ob es passt.
+    private func autoFitIfDue() {
+        let now = CACurrentMediaTime()
+        guard !fitBusy, now - lastAutoFit > 1, featurePoints.count >= 120, scanProgress >= 0.3,
+              let ghost else { return }
+        lastAutoFit = now
+        runAutoFit(from: ghost.transformMatrix(relativeTo: nil), final: false) { _ in }
+    }
+
+    private func runAutoFit(from pose: simd_float4x4, final: Bool, completion: @escaping @MainActor (Bool) -> Void) {
+        fitBusy = true
+        let model = modelSamples, points = Array(featurePoints.values), id = sessionID
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let result = AutoAligner.fit(model: model, pose: pose, points: points, tryReversed: final)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self, self.sessionID == id else { return }
+                    self.fitBusy = false
+                    completion(self.adoptFit(result, final: final))
+                }
+            }
+        }
+    }
+
+    /// Übernimmt die automatische Anpassung, wenn sie gut passt und nicht zu weit von der
+    /// Hand-Ausrichtung wegführt.
+    private func adoptFit(_ result: AutoAligner.Result?, final: Bool) -> Bool {
+        guard phase == (final ? .saving : .scanning),
+              let result, let ghost, let manualPose, let floorY,
+              result.error < maxFitError, result.matchedPoints >= 40 else { return false }
+        var pose = result.pose
+        let shift = SIMD2(pose.columns.3.x - manualPose.columns.3.x, pose.columns.3.z - manualPose.columns.3.z)
+        guard simd_length(shift) < maxFitShift else { return false }
+        // Das Auto steht auf dem Boden: die Höhe nur wenig korrigieren.
+        pose.columns.3.y = min(floorY + 0.01, max(floorY - 0.01, pose.columns.3.y))
+        if final {
+            ghost.transform = Transform(matrix: pose)
+        } else {
+            ghost.move(to: Transform(matrix: pose), relativeTo: nil, duration: 0.3, timingFunction: .easeInOut)
+        }
+        note = String(format: "Automatisch angepasst: %.1f mm mittlere Abweichung, %d Messpunkte",
+                      result.error * 1000, result.matchedPoints)
+        return true
+    }
+
+    /// Passt das Modell ein letztes Mal an und erzeugt dann das Referenzobjekt aus allem, was beim
+    /// Rundgang in der Box ums Modell gesehen wurde.
     func finishScan() {
         guard phase == .scanning, scanProgress >= minimumScanProgress, let ghost else { return }
         phase = .saving
+        runAutoFit(from: ghost.transformMatrix(relativeTo: nil), final: true) { [weak self] adopted in
+            self?.createReferenceObject(autoFitted: adopted)
+        }
+    }
 
-        let size = CarModelFactory.realSize
+    private func createReferenceObject(autoFitted: Bool) {
+        guard phase == .saving, let ghost else { return }
+        let size = carSize
         // Etwas Luft zu den Seiten, der Boden selbst bleibt draußen (sonst stört er, wenn das Auto woanders steht).
         let floorGap: Float = 0.003
         let extent = SIMD3(size.x * 1.15, size.y * 1.05, size.z * 1.1)
         let center = SIMD3<Float>(0, floorGap + extent.y / 2, 0)
-        let id = sessionID
+        let id = sessionID, scale = ghostScale
 
         arView.session.createReferenceObject(transform: ghost.transformMatrix(relativeTo: nil),
                                              center: center, extent: extent) { [weak self] object, error in
             Task { @MainActor in
                 guard let self, self.sessionID == id else { return }
-                self.saveLearned(object, error: error)
+                self.saveLearned(object, error: error, scale: scale, autoFitted: autoFitted)
             }
         }
     }
 
-    private func saveLearned(_ object: ARReferenceObject?, error: Error?) {
+    private func saveLearned(_ object: ARReferenceObject?, error: Error?, scale: Float, autoFitted: Bool) {
         guard let object else {
             phase = .scanning
             message = "Noch nicht genug vom Auto erkannt (\(error?.localizedDescription ?? "unbekannter Fehler")). Geh noch eine Runde, etwas näher und langsamer."
             return
         }
         do {
-            try ReferenceObjectLibrary.saveLearned(object, preview: arView.session.currentFrame.flatMap(Self.preview(of:)))
+            try ReferenceObjectLibrary.saveLearned(object, scale: scale,
+                                                   preview: arView.session.currentFrame.flatMap(Self.preview(of:)))
+            let summary = autoFitted
+                ? "Eingelernt. " + (note ?? "")
+                : "Eingelernt, ohne automatische Anpassung (zu wenige Messpunkte am Auto) – deine Ausrichtung gilt."
             startSession()
+            note = summary
         } catch {
             phase = .scanning
             message = "Speichern fehlgeschlagen: \(error.localizedDescription)"
@@ -534,7 +711,11 @@ extension ARController: UIGestureRecognizerDelegate {
 extension ARController: ARSessionDelegate {
     nonisolated func session(_ session: ARSession, didUpdate frame: ARFrame) {
         MainActor.assumeIsolated {
-            followMotion(in: frame)
+            if phase == .scanning {
+                collectFeaturePoints(from: frame)
+            } else {
+                followMotion(in: frame)
+            }
         }
     }
 
@@ -575,15 +756,25 @@ enum ReferenceObjectLibrary {
         return try? ARReferenceObject(archiveURL: learnedURL)
     }
 
-    static func saveLearned(_ object: ARReferenceObject, preview: UIImage?) throws {
+    /// Größenkorrektur, mit der das Auto eingelernt wurde.
+    static var learnedScale: Float {
+        let scale = UserDefaults.standard.float(forKey: scaleKey)
+        return scale > 0 ? scale : 1
+    }
+
+    static func saveLearned(_ object: ARReferenceObject, scale: Float, preview: UIImage?) throws {
         try FileManager.default.createDirectory(at: learnedURL.deletingLastPathComponent(),
                                                 withIntermediateDirectories: true)
         try object.export(to: learnedURL, previewImage: preview)
+        UserDefaults.standard.set(scale, forKey: scaleKey)
     }
 
     static func deleteLearned() {
         try? FileManager.default.removeItem(at: learnedURL)
+        UserDefaults.standard.removeObject(forKey: scaleKey)
     }
+
+    private static let scaleKey = "learnedCarScale"
 
     private static var learnedURL: URL {
         URL.applicationSupportDirectory.appendingPathComponent("ToyCar.arobject")

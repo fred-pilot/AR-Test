@@ -223,7 +223,7 @@ private struct Pinhole {
 }
 
 /// Starre Bewegung in der Bodenebene (x, z): Drehung um die Senkrechte plus Verschiebung.
-private struct RigidFit2D {
+struct RigidFit2D {
     var angle: Float
     var translation: SIMD2<Float>
     var inliers = 0
@@ -273,6 +273,6 @@ private struct RigidFit2D {
     }
 }
 
-private extension SIMD4 where Scalar == Float {
+extension SIMD4 where Scalar == Float {
     var xyz: SIMD3<Float> { SIMD3(x, y, z) }
 }
