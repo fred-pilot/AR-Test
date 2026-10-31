@@ -4,7 +4,7 @@ name: OffroadAR
 options:
   bundleIdPrefix: de.fredericdeppe
   deploymentTarget:
-    iOS: "17.0"
+    iOS: "27.0"
   createIntermediateGroups: true
 settings:
   base:
@@ -17,8 +17,6 @@ targets:
     platform: iOS
     sources:
       - path: OffroadAR
-      - path: Resources/ReferenceObjects
-        type: folder
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: de.fredericdeppe.offroadar

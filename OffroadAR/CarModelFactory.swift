@@ -1,4 +1,3 @@
-import ARKit
 import RealityKit
 import UIKit
 
@@ -9,7 +8,7 @@ import UIKit
 /// (Räder, Wischer, Lichter) selbst ein, an den Stellen aus dem passenden `Layout`.
 ///
 /// Modellkoordinaten: Länge 1 entlang z (vorne = -z), Boden bei y = 0, rechts = +x.
-/// `fit` skaliert das Modell anschließend auf die Größe des Scans.
+/// `placedAtRealSize` skaliert das Modell anschließend auf die Größe des echten Autos.
 @MainActor
 enum CarModelFactory {
     static func makeCar() -> Entity {
@@ -27,30 +26,17 @@ enum CarModelFactory {
         return car
     }
 
-    /// Breite, Höhe und Länge des Modells im Verhältnis zur Länge (Länge = 1).
-    static func proportions() -> SIMD3<Float> {
-        if let cachedProportions { return cachedProportions }
-        let extents = makeCar().visualBounds(relativeTo: nil).extents
-        let proportions = extents / extents.z
-        cachedProportions = proportions
-        return proportions
-    }
+    /// Gemessen am echten Auto: 10,2 cm vom Kanister hinten bis zur vorderen Stoßstange.
+    /// Muss zur Länge passen, mit der das Trainingsmodell exportiert wurde (tools/scan_to_usdz/export_usdz.py).
+    static let realLength: Float = 0.102
 
-    private static var cachedProportions: SIMD3<Float>?
-
-    /// Setzt das Auto so in den Scan-Kasten, dass es ihn ausfüllt (gleichmäßig skaliert).
-    static func fit(_ car: Entity, to reference: ARReferenceObject) -> Entity {
+    /// Bringt das Auto auf echte Größe. Das Trainingsmodell für die Erkennung liegt im selben
+    /// Koordinatensystem (nur mit `realLength` skaliert), deshalb sitzt das Modell ohne weitere
+    /// Verschiebung genau auf dem erkannten Auto.
+    static func placedAtRealSize(_ car: Entity) -> Entity {
         let container = Entity()
         container.addChild(car)
-
-        let bounds = car.visualBounds(relativeTo: car)
-        car.position = SIMD3(-bounds.center.x, -bounds.min.y, -bounds.center.z)
-
-        let extent = reference.extent
-        let size = bounds.extents
-        let scale = (extent.x / size.x + extent.z / size.z) / 2
-        container.scale = SIMD3(repeating: scale)
-        container.position = reference.center - SIMD3(0, extent.y / 2, 0)
+        container.scale = SIMD3(repeating: realLength)
         return container
     }
 

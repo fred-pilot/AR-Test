@@ -7,14 +7,11 @@ on:
 
 jobs:
   build:
-    runs-on: macos-latest
+    # Xcode 27 mit iOS-27-SDK, nötig für die Objektverfolgung (trackingObjects).
+    runs-on: xcode-27
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
-
-      - uses: maxim-lobanov/setup-xcode@v1
-        with:
-          xcode-version: latest-stable
 
       - name: XcodeGen installieren
         run: brew install xcodegen

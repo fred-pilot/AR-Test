@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Baut eine unsignierte OffroadAR.ipa zum Installieren mit Sideloadly oder AltStore.
-# Läuft auf dem eigenen Mac (ab Xcode 15.2) und in GitHub Actions.
+# Läuft in GitHub Actions und auf einem Mac mit Xcode 27 oder neuer (iOS-27-SDK für die Objektverfolgung).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

@@ -1,6 +1,11 @@
 """Gescannte Karosserie aufräumen (Räder und Boden-Schürze raus) und als ToyCar.usdz exportieren.
 
-Die drehenden Räder, Wischer und Lichter setzt die App selbst an die vermessenen Stellen."""
+Die drehenden Räder, Wischer und Lichter setzt die App selbst an die vermessenen Stellen.
+
+Mit einer Länge in Metern als viertem Argument entsteht stattdessen das Trainingsmodell für die
+Objekterkennung (Create ML): Die gescannten Räder bleiben drin, nur die Schürze fliegt raus, und das
+Modell wird auf echte Größe skaliert. Es liegt im selben Koordinatensystem wie ToyCar.usdz, nur mit
+der Länge multipliziert, damit die App ihr Modell ohne Verschiebung aufs erkannte Auto setzen kann."""
 import os
 import shutil
 import sys
@@ -9,6 +14,8 @@ from PIL import Image
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade, UsdUtils, Vt
 
 work_dir, tex_dir, out_usdz = sys.argv[1], sys.argv[2], sys.argv[3]
+real_length = float(sys.argv[4]) if len(sys.argv) > 4 else None
+training = real_length is not None
 d = np.load(os.path.join(work_dir, "car_norm.npz"))
 p, uv, n, tri = d["p"], d["uv"], d["n"], d["tri"]
 
@@ -20,17 +27,23 @@ remove = c[:, 1] < 0.075                                   # Schürze bis zum Bo
 for wx, wz in WHEELS:
     in_wheel = (np.abs(c[:, 0]) > 0.13) & (np.sign(c[:, 0]) == np.sign(wx)) & \
                (np.hypot(c[:, 2] - wz, c[:, 1] - WHEEL_R) < WHEEL_R + 0.007)
-    remove |= in_wheel
+    if training:
+        remove &= ~in_wheel                                # Räder behalten, sie gehören zum Aussehen
+    else:
+        remove |= in_wheel
 tri = tri[~remove]
 print("Dreiecke entfernt", int(remove.sum()), "übrig", len(tri))
 
 used, inverse = np.unique(tri, return_inverse=True)
 tri = inverse.reshape(-1, 3)
 p, uv, n = p[used], uv[used], n[used]
-np.savez(os.path.join(work_dir, "car_body.npz"), p=p, uv=uv, tri=tri, col=d["col"][used])
+if training:
+    p = p * real_length
+else:
+    np.savez(os.path.join(work_dir, "car_body.npz"), p=p, uv=uv, tri=tri, col=d["col"][used])
 
 # Texturen: Farbe in voller Auflösung, Normal- und AO-Map halbiert (spart Grafikspeicher auf dem iPhone)
-build = os.path.join(work_dir, "usd_build")
+build = os.path.join(work_dir, "usd_build_training" if training else "usd_build")
 shutil.rmtree(build, ignore_errors=True)
 os.makedirs(os.path.join(build, "textures"))
 textures = {
