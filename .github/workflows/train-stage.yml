@@ -1,0 +1,78 @@
+name: Trainingsetappe
+
+on:
+  workflow_call:
+    inputs:
+      stage:
+        type: number
+        required: true
+
+jobs:
+  train:
+    strategy:
+      fail-fast: false
+      matrix:
+        # standard ist schneller fertig, extended erkennt und verfolgt genauer (empfohlen für trackingObjects).
+        mode: [standard, extended]
+    runs-on: xcode-27
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stand der vorigen Etappe holen
+        if: inputs.stage > 1
+        uses: actions/download-artifact@v4
+        with:
+          name: state-${{ matrix.mode }}-${{ inputs.stage - 1 }}
+          path: state
+
+      - name: Trainieren (höchstens 5,5 Stunden)
+        id: train
+        run: |
+          mkdir -p state/checkpoint
+          if [ -f state/ToyCar.referenceobject ]; then
+            echo "Schon in einer früheren Etappe fertig geworden."
+            exit 0
+          fi
+          xcodebuild -version | head -n 1
+
+          xcrun createml objecttracker \
+            --training-mode "${{ matrix.mode }}" --upright \
+            --source training/ToyCar_training.usdz \
+            --output state/ToyCar.referenceobject \
+            --checkpoint state/checkpoint \
+            --summary --csv-progress --csv-fd 4 4>>state/progress.csv &
+          pid=$!
+          # Vor dem 6-Stunden-Limit sauber anhalten, damit der Checkpoint hochgeladen werden kann.
+          ( sleep 19800; echo "Zeit für diese Etappe um, halte an."; kill -INT "$pid" 2>/dev/null ) &
+          watchdog=$!
+          ( while kill -0 "$pid" 2>/dev/null; do sleep 600; echo "Fortschritt: $(tail -n 1 state/progress.csv 2>/dev/null)"; done ) &
+          set +e
+          wait "$pid"
+          code=$?
+          set -e
+          kill "$watchdog" 2>/dev/null || true
+          echo "createml beendet mit Code $code"
+          if [ -f state/ToyCar.referenceobject ]; then
+            echo "finished=true" >> "$GITHUB_OUTPUT"
+            ls -l state/ToyCar.referenceobject
+          fi
+
+      - name: Stand für die nächste Etappe sichern
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: state-${{ matrix.mode }}-${{ inputs.stage }}
+          path: state
+          include-hidden-files: true
+          retention-days: 3
+
+      - name: Fertiges Referenzobjekt hochladen
+        if: steps.train.outputs.finished == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ToyCar-${{ matrix.mode }}
+          path: |
+            state/ToyCar.referenceobject
+            state/progress.csv
+          retention-days: 30
