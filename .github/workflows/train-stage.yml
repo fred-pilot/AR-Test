@@ -33,19 +33,25 @@ jobs:
       # Create ML braucht im Modus extended mindestens 43 GB freien Platz, mehr als der Runner von Haus aus hat.
       - name: Speicherplatz freiräumen
         run: |
+          set +e
           df -h /
-          xcrun simctl shutdown all 2>/dev/null || true
-          xcrun simctl delete all 2>/dev/null || true
-          xcrun simctl runtime delete all 2>/dev/null || true
-          active=$(dirname "$(dirname "$(xcode-select -p)")")
+          xcrun simctl shutdown all 2>/dev/null
+          xcrun simctl delete all 2>/dev/null
+          xcrun simctl runtime delete all 2>/dev/null
+          # Alle Xcode-Versionen außer der aktiven löschen. Verknüpfungen belegen keinen Platz und bleiben.
+          active=$(cd "$(xcode-select -p)/../.." && pwd -P)
+          echo "Aktives Xcode: $active"
           for app in /Applications/Xcode*.app; do
-            real=$(cd "$app" && pwd -P)
-            [ "$real" = "$(cd "$active" && pwd -P)" ] || sudo rm -rf "$app"
+            [ -L "$app" ] && continue
+            [ "$(cd "$app" 2>/dev/null && pwd -P)" = "$active" ] && continue
+            echo "Lösche $app"
+            sudo rm -rf "$app"
           done
           sudo rm -rf ~/Library/Android ~/.android ~/.dotnet /usr/local/share/dotnet \
             ~/hostedtoolcache /Users/runner/hostedtoolcache ~/Library/Developer/CoreSimulator/Caches \
-            ~/Library/Caches/com.apple.dt.* /Library/Developer/CoreSimulator/Images 2>/dev/null || true
+            /Library/Developer/CoreSimulator/Images 2>/dev/null
           df -h /
+          exit 0
 
       - name: Trainieren (höchstens 5,5 Stunden)
         id: train
