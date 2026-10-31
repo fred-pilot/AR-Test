@@ -30,9 +30,13 @@ enum CarModelFactory {
     /// Muss zur Länge passen, mit der das Trainingsmodell exportiert wurde (tools/scan_to_usdz/export_usdz.py).
     static let realLength: Float = 0.102
 
+    /// Breite, Höhe und Länge des echten Autos in Metern (aus dem Scan, mit Rädern).
+    static let realSize = SIMD3<Float>(0.052, 0.063, 0.102)
+
     /// Bringt das Auto auf echte Größe. Das Trainingsmodell für die Erkennung liegt im selben
-    /// Koordinatensystem (nur mit `realLength` skaliert), deshalb sitzt das Modell ohne weitere
-    /// Verschiebung genau auf dem erkannten Auto.
+    /// Koordinatensystem (nur mit `realLength` skaliert), und beim Einlernen am iPhone wird das
+    /// Referenzobjekt genau an diesem Modell ausgerichtet. Deshalb sitzt das Modell ohne weitere
+    /// Verschiebung auf dem erkannten Auto.
     static func placedAtRealSize(_ car: Entity) -> Entity {
         let container = Entity()
         container.addChild(car)

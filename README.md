@@ -3,10 +3,11 @@
 iPhone-App, die deinen Spielzeug-Geländewagen per Kamera erkennt und ein animiertes 3D-Modell
 passgenau darüberlegt: Die Reifen drehen sich, die Scheibenwischer wischen, Warnblinker und Scheinwerfer blinken.
 
-- **Kein Einscannen nötig:** Die App kennt das Auto aus seinem 3D-Modell. Kamera drauf, fertig.
-  Lage, Drehung und Höhe erkennt ARKit selbst und verfolgt das Auto in jedem Kamerabild,
-  auch wenn du es über den Tisch schiebst.
-- Braucht **iOS 27** oder neuer (Objektverfolgung von ARKit).
+- **Einmal einlernen, dann automatisch:** Beim ersten Start legst du das Modell einmal aufs Auto und
+  gehst einmal darum herum (etwa eine Minute). Ab dann erkennt die App das Auto bei jedem Start von selbst,
+  samt Lage, Drehung, Höhe und Boden, und legt das Modell darüber.
+- Schiebst du das Auto, sucht die App es laufend neu und zieht das Modell nach (mit etwa einer Sekunde Verzögerung).
+- Braucht **iOS 27** oder neuer.
 - Mit LiDAR (z. B. iPhone 16 Pro) zusätzlich: optionale Verdeckung durch die Umgebung.
 - Hände vor dem Auto verdecken das Modell.
 
@@ -14,15 +15,14 @@ passgenau darüberlegt: Die Reifen drehen sich, die Scheibenwischer wischen, War
 
 | Datei | Inhalt |
 |---|---|
-| `OffroadAR/ARController.swift` | AR-Session: erkennt und verfolgt das Auto, hängt das Modell daran |
-| `OffroadAR/ToyCar.referenceobject` | Das trainierte Erkennungsmodell des Autos (aus `training/ToyCar_training.usdz`) |
+| `OffroadAR/ARController.swift` | AR-Session: Einlernen, Erkennen und Nachführen des Autos |
+| `OffroadAR/ContentView.swift` | Oberfläche: Anleitung beim Einlernen, Schalter für die Animationen |
 | `OffroadAR/ToyCar.usdz` | Die gescannte Karosserie (aus deinem Foto-Scan, ausgerichtet und bereinigt) |
 | `OffroadAR/CarModelFactory.swift` | Lädt die Karosserie und setzt Räder, Wischer und Lichter an die vermessenen Stellen |
 | `OffroadAR/CarAnimator.swift` | Animation von Rädern, Wischern und Lichtern |
 | `training/ToyCar_training.usdz` | Trainingsmodell: der Scan mit seinen echten Rädern, in echter Größe (10,2 cm) |
 | `project.yml` | Projektbeschreibung für XcodeGen (daraus entsteht das Xcode-Projekt) |
 | `.github/workflows/ios.yml` | Baut die App in der Cloud als `.ipa`-Datei |
-| `.github/workflows/train.yml` | Trainiert in der Cloud das Erkennungsmodell (dauert mehrere Stunden) |
 | `tools/scan_to_usdz/` | Python-Skripte, mit denen aus dem OBJ-Scan die `ToyCar.usdz` und das Trainingsmodell gemacht wurden |
 
 ### Das 3D-Modell
@@ -46,15 +46,21 @@ nur zu diesem einen Scan. Die `0.102` ist die echte Länge in Metern und muss zu
 `CarModelFactory.realLength` passen.
 
 ### Die Erkennung
-Damit die App das Auto ohne Scan findet, wird aus `training/ToyCar_training.usdz` mit Create ML ein
-Referenzobjekt trainiert (`.referenceobject`). Das läuft in der Cloud über
-**Actions → Objekterkennung trainieren** und startet automatisch, wenn sich das Trainingsmodell ändert.
-Es trainiert zwei Varianten gleichzeitig: `standard` (schneller fertig) und `extended` (genauer, empfohlen).
-Das Ergebnis liegt danach bei den Artifacts als `ToyCar-standard` bzw. `ToyCar-extended` und kommt als
-`OffroadAR/ToyCar.referenceobject` in die App.
+Beim Einlernen entsteht ein ARKit-Referenzobjekt (`ToyCar.arobject`) in den App-Daten. Sein Ursprung ist
+genau die Stelle, an die du das Modell gelegt hast. Darum sitzt das animierte Modell später ohne
+Korrektur auf dem erkannten Auto. Liegt es nicht genau, hilft **Neu einlernen**.
 
+ARKit erkennt so ein eingelerntes Objekt nur, es verfolgt es nicht Bild für Bild. Die App vergisst das
+erkannte Auto deshalb nach einem Moment wieder, ARKit findet es neu, und das Modell rückt an die neue Stelle.
+
+**Noch genauer, mit Verfolgung in jedem Bild:** Aus `training/ToyCar_training.usdz` lässt sich mit Create ML
+ein `.referenceobject` trainieren. Das braucht einen Mac mit Apple-Chip (M1 oder neuer) und macOS 27,
+auf den kostenlosen GitHub-Macs ist es ohne Grafikbeschleunigung viel zu langsam:
+```
+xcrun createml objecttracker -m extended -s training/ToyCar_training.usdz -o OffroadAR/ToyCar.referenceobject
+```
+Liegt `OffroadAR/ToyCar.referenceobject` in der App, nimmt sie automatisch das und überspringt das Einlernen.
 Das Trainingsmodell liegt im selben Koordinatensystem wie `ToyCar.usdz`, nur auf echte Größe skaliert.
-Darum sitzt das animierte Modell ohne weitere Korrektur genau auf dem erkannten Auto.
 
 ## So kommt die App aufs iPhone (kostenlos, ohne Developer Program)
 
@@ -63,7 +69,7 @@ Auf dem Windows-PC signiert ein Sideloading-Programm sie mit deiner **normalen, 
 und installiert sie per USB-Kabel auf dem iPhone.
 
 Einschränkungen einer kostenlosen Apple-ID (Vorgabe von Apple):
-- Die App läuft **7 Tage**, danach muss sie neu installiert werden (einfach drüber installieren, dann bleiben die Scans erhalten).
+- Die App läuft **7 Tage**, danach muss sie neu installiert werden (einfach drüber installieren, dann bleibt das eingelernte Auto erhalten).
 - Höchstens 3 selbst installierte Apps gleichzeitig.
 - Weitergabe an andere ist so nicht möglich.
 
@@ -91,10 +97,14 @@ nicht mehr auf dem MacBook Pro 2017. Darum baut GitHub die App in der Cloud.
 
 ## Benutzung der App
 
-1. Auto auf einen Tisch stellen, gutes Licht.
-2. App öffnen und die Kamera aus 20 bis 50 cm Abstand aufs Auto richten.
-3. Sobald das Auto erkannt ist, liegt das Modell darauf und bleibt dort, auch wenn du um das Auto
-   herumgehst oder es schiebst.
+Beim ersten Start (einmalig):
+1. Auto auf Boden oder Tisch stellen, gutes Licht, möglichst nichts anderes direkt daneben.
+2. Das Auto auf dem Bildschirm antippen. Ein halbdurchsichtiges Modell erscheint.
+3. Mit einem Finger schieben, mit zwei Fingern drehen, bis das Modell genau auf dem Auto sitzt. **Passt** tippen.
+4. Langsam einmal ganz um das Auto herumgehen, 30 bis 50 cm entfernt und leicht von oben.
+   Bei 100 % speichert die App von selbst (ab 75 % geht auch **Fertig**).
+
+Danach bei jedem Start: Kamera aufs Auto richten, das Modell erscheint von selbst.
 
 Mit **Reifen**, **Wischer** und **Licht** schaltest du die Animationen ein und aus.
-**Auto neu suchen** startet die Erkennung von vorn.
+**Auto neu suchen** startet die Erkennung von vorn, **Neu einlernen** vergisst das Auto und beginnt das Einlernen neu.

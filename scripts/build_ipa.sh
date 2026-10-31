@@ -36,6 +36,14 @@ xcodebuild archive \
   CODE_SIGN_IDENTITY="" \
   -quiet
 
-cp -R "$OUT_DIR/OffroadAR.xcarchive/Products/Applications/OffroadAR.app" "$OUT_DIR/Payload/"
+APP="$OUT_DIR/OffroadAR.xcarchive/Products/Applications/OffroadAR.app"
+# Ohne das trainierte Referenzobjekt erkennt die App das Auto nicht – lieber hier abbrechen.
+if [ -e OffroadAR/ToyCar.referenceobject ] && [ ! -e "$APP/ToyCar.referenceobject" ]; then
+  echo "ToyCar.referenceobject fehlt im App-Bundle:"
+  ls -la "$APP"
+  exit 1
+fi
+
+cp -R "$APP" "$OUT_DIR/Payload/"
 (cd "$OUT_DIR" && zip -qr OffroadAR.ipa Payload)
 echo "Fertig: $OUT_DIR/OffroadAR.ipa"
